@@ -12,9 +12,10 @@
     button { background: #3b82f6; color: white; font-weight: bold; border: none; cursor: pointer; }
     button:active { background: #2563eb; }
     .btn-trade { background: #10b981; margin-top: 15px; }
-    #resultBox { margin-top: 15px; padding: 12px; border-radius: 8px; background: #0f172a; font-size: 15px; text-align: left; }
+    #resultBox { margin-top: 15px; padding: 12px; border-radius: 8px; background: #0f172a; font-size: 14px; text-align: left; line-height: 1.6; }
     .buy { color: #34d399; font-weight: bold; }
     .sell { color: #f87171; font-weight: bold; }
+    .status { color: #94a3b8; font-size: 13px; }
   </style>
 </head>
 <body>
@@ -29,6 +30,7 @@
     <select id="symbol">
       <option value="R_100">Volatility 100 Index</option>
       <option value="R_50">Volatility 50 Index</option>
+      <option value="1HZ100V">Volatility 100 (1s) Index</option>
       <option value="frxEURUSD">EUR/USD Forex</option>
     </select>
 
@@ -37,7 +39,7 @@
 
     <button onclick="runAnalysis()">⚡ Analyze Market</button>
 
-    <div id="resultBox">Analysis status will appear here...</div>
+    <div id="resultBox">Ready. Tap 'Analyze Market' to start.</div>
 
     <button id="tradeBtn" class="btn-trade" style="display:none;" onclick="placeTrade()">Execute Trade</button>
   </div>
@@ -47,53 +49,63 @@
     let latestSignal = null;
 
     function runAnalysis() {
-      const token = document.getElementById('apiToken').value.trim();
-      const symbol = document.getElementById('symbol').value;
       const resultBox = document.getElementById('resultBox');
       const tradeBtn = document.getElementById('tradeBtn');
+      const symbol = document.getElementById('symbol').value;
 
-      if (!token) {
-        alert("Please paste your Deriv API token first!");
-        return;
+      tradeBtn.style.display = "none";
+      resultBox.innerHTML = "<span class='status'>Connecting to Deriv WebSocket...</span>";
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
       }
 
-      resultBox.innerHTML = "Connecting to market feed & running analysis...";
-      tradeBtn.style.display = "none";
-
-      ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=1085');
+      // Deriv official public app ID
+      ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=1089');
 
       ws.onopen = () => {
-        // Authenticate
-        ws.send(JSON.stringify({ authorize: token }));
+        resultBox.innerHTML = "<span class='status'>Connected! Requesting live market candles...</span>";
+        
+        // Request candles directly (does not wait for authorization)
+        ws.send(JSON.stringify({
+          ticks_history: symbol,
+          adjust_start_time: 1,
+          count: 50,
+          end: "latest",
+          style: "candles",
+          granularity: 60
+        }));
+      };
+
+      ws.onerror = (err) => {
+        resultBox.innerHTML = `<span class="sell">Connection failed. Check your internet connection.</span>`;
       };
 
       ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
 
-        if (data.msg_type === 'authorize') {
-          // Request the last 50 market candles
-          ws.send(JSON.stringify({
-            ticks_history: symbol,
-            adjust_start_time: 1,
-            count: 50,
-            end: "latest",
-            style: "candles",
-            granularity: 60
-          }));
+        if (data.error) {
+          resultBox.innerHTML = `<span class="sell">Error from Deriv: ${data.error.message}</span>`;
+          return;
         }
 
         if (data.msg_type === 'candles') {
           const candles = data.candles;
+          if (!candles || candles.length === 0) {
+            resultBox.innerHTML = `<span class="sell">No candle data received for this symbol.</span>`;
+            return;
+          }
           analyzeStrategy(candles);
         }
 
-        if (data.msg_type === 'buy') {
-          resultBox.innerHTML += `<br><span class="buy">Trade Placed Successfully! ID: ${data.buy.contract_id}</span>`;
-          tradeBtn.style.display = "none";
+        if (data.msg_type === 'authorize') {
+          resultBox.innerHTML += `<br><span class="status">Account authorized. Sending order...</span>`;
+          sendOrder();
         }
 
-        if (data.error) {
-          resultBox.innerHTML = `<span class="sell">Error: ${data.error.message}</span>`;
+        if (data.msg_type === 'buy') {
+          resultBox.innerHTML += `<br><span class="buy">✓ Trade Placed Successfully!<br>Contract ID: ${data.buy.contract_id}<br>Payout: $${data.buy.payout}</span>`;
+          tradeBtn.style.display = "none";
         }
       };
     }
@@ -102,10 +114,10 @@
       const closes = candles.map(c => c.close);
       const currentPrice = closes[closes.length - 1];
 
-      // 1. Calculate Simple Moving Average (Trend Direction)
+      // Simple Moving Average
       const sma = closes.reduce((a, b) => a + b, 0) / closes.length;
 
-      // 2. Simplified RSI Momentum Calculation
+      // RSI Momentum
       let gains = 0, losses = 0;
       for (let i = closes.length - 14; i < closes.length; i++) {
         let diff = closes[i] - closes[i - 1];
@@ -115,26 +127,25 @@
       let rs = gains / (losses || 1);
       let rsi = 100 - (100 / (1 + rs));
 
-      // 3. AI Logic Decision
       let signal = "NEUTRAL";
       let confidence = 50;
 
       if (currentPrice > sma && rsi < 70) {
         signal = "BUY";
-        confidence = Math.min(85, Math.round(50 + (rsi / 2)));
+        confidence = Math.min(88, Math.round(55 + (rsi / 3)));
       } else if (currentPrice < sma && rsi > 30) {
         signal = "SELL";
-        confidence = Math.min(85, Math.round(50 + ((100 - rsi) / 2)));
+        confidence = Math.min(88, Math.round(55 + ((100 - rsi) / 3)));
       }
 
       latestSignal = signal;
 
-      // Display the result
       const resultBox = document.getElementById('resultBox');
       const tradeBtn = document.getElementById('tradeBtn');
 
       resultBox.innerHTML = `
-        <strong>Market Price:</strong> ${currentPrice}<br>
+        <strong>Asset:</strong> ${document.getElementById('symbol').value}<br>
+        <strong>Live Price:</strong> ${currentPrice}<br>
         <strong>RSI Momentum:</strong> ${rsi.toFixed(1)}<br>
         <strong>Signal:</strong> <span class="${signal === 'BUY' ? 'buy' : 'sell'}">${signal}</span><br>
         <strong>AI Confidence:</strong> ${confidence}%
@@ -147,11 +158,19 @@
     }
 
     function placeTrade() {
+      const token = document.getElementById('apiToken').value.trim();
+      if (!token) {
+        alert("Please paste your Deriv API token before executing!");
+        return;
+      }
+      document.getElementById('resultBox').innerHTML += "<br><span class='status'>Authorizing token with Deriv...</span>";
+      ws.send(JSON.stringify({ authorize: token }));
+    }
+
+    function sendOrder() {
       const stake = parseFloat(document.getElementById('stake').value);
       const symbol = document.getElementById('symbol').value;
       const contractType = latestSignal === "BUY" ? "CALL" : "PUT";
-
-      document.getElementById('resultBox').innerHTML += "<br>Placing trade on your demo account...";
 
       ws.send(JSON.stringify({
         buy: 1,
