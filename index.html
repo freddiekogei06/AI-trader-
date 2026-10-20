@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Market Analyzer</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; text-align: center; }
+    .card { background: #1e293b; border-radius: 12px; padding: 20px; max-width: 400px; margin: 0 auto; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+    input, select, button { width: 100%; padding: 12px; margin: 8px 0; border-radius: 8px; border: 1px solid #334155; box-sizing: border-box; font-size: 16px; }
+    input, select { background: #0f172a; color: white; }
+    button { background: #3b82f6; color: white; font-weight: bold; border: none; cursor: pointer; }
+    button:active { background: #2563eb; }
+    .btn-trade { background: #10b981; margin-top: 15px; }
+    #resultBox { margin-top: 15px; padding: 12px; border-radius: 8px; background: #0f172a; font-size: 15px; text-align: left; }
+    .buy { color: #34d399; font-weight: bold; }
+    .sell { color: #f87171; font-weight: bold; }
+  </style>
+</head>
+<body>
+
+  <div class="card">
+    <h2>AI Market Analyzer</h2>
+
+    <label>Deriv API Token:</label>
+    <input type="password" id="apiToken" placeholder="Paste your Deriv API token">
+
+    <label>Market Asset:</label>
+    <select id="symbol">
+      <option value="R_100">Volatility 100 Index</option>
+      <option value="R_50">Volatility 50 Index</option>
+      <option value="frxEURUSD">EUR/USD Forex</option>
+    </select>
+
+    <label>Stake Amount ($):</label>
+    <input type="number" id="stake" value="1" min="0.5" step="0.5">
+
+    <button onclick="runAnalysis()">⚡ Analyze Market</button>
+
+    <div id="resultBox">Analysis status will appear here...</div>
+
+    <button id="tradeBtn" class="btn-trade" style="display:none;" onclick="placeTrade()">Execute Trade</button>
+  </div>
+
+  <script>
+    let ws;
+    let latestSignal = null;
+
+    function runAnalysis() {
+      const token = document.getElementById('apiToken').value.trim();
+      const symbol = document.getElementById('symbol').value;
+      const resultBox = document.getElementById('resultBox');
+      const tradeBtn = document.getElementById('tradeBtn');
+
+      if (!token) {
+        alert("Please paste your Deriv API token first!");
+        return;
+      }
+
+      resultBox.innerHTML = "Connecting to market feed & running analysis...";
+      tradeBtn.style.display = "none";
+
+      ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=1085');
+
+      ws.onopen = () => {
+        // Authenticate
+        ws.send(JSON.stringify({ authorize: token }));
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.msg_type === 'authorize') {
+          // Request the last 50 market candles
+          ws.send(JSON.stringify({
+            ticks_history: symbol,
+            adjust_start_time: 1,
+            count: 50,
+            end: "latest",
+            style: "candles",
+            granularity: 60
+          }));
+        }
+
+        if (data.msg_type === 'candles') {
+          const candles = data.candles;
+          analyzeStrategy(candles);
+        }
+
+        if (data.msg_type === 'buy') {
+          resultBox.innerHTML += `<br><span class="buy">Trade Placed Successfully! ID: ${data.buy.contract_id}</span>`;
+          tradeBtn.style.display = "none";
+        }
+
+        if (data.error) {
+          resultBox.innerHTML = `<span class="sell">Error: ${data.error.message}</span>`;
+        }
+      };
+    }
+
+    function analyzeStrategy(candles) {
+      const closes = candles.map(c => c.close);
+      const currentPrice = closes[closes.length - 1];
+
+      // 1. Calculate Simple Moving Average (Trend Direction)
+      const sma = closes.reduce((a, b) => a + b, 0) / closes.length;
+
+      // 2. Simplified RSI Momentum Calculation
+      let gains = 0, losses = 0;
+      for (let i = closes.length - 14; i < closes.length; i++) {
+        let diff = closes[i] - closes[i - 1];
+        if (diff >= 0) gains += diff;
+        else losses -= diff;
+      }
+      let rs = gains / (losses || 1);
+      let rsi = 100 - (100 / (1 + rs));
+
+      // 3. AI Logic Decision
+      let signal = "NEUTRAL";
+      let confidence = 50;
+
+      if (currentPrice > sma && rsi < 70) {
+        signal = "BUY";
+        confidence = Math.min(85, Math.round(50 + (rsi / 2)));
+      } else if (currentPrice < sma && rsi > 30) {
+        signal = "SELL";
+        confidence = Math.min(85, Math.round(50 + ((100 - rsi) / 2)));
+      }
+
+      latestSignal = signal;
+
+      // Display the result
+      const resultBox = document.getElementById('resultBox');
+      const tradeBtn = document.getElementById('tradeBtn');
+
+      resultBox.innerHTML = `
+        <strong>Market Price:</strong> ${currentPrice}<br>
+        <strong>RSI Momentum:</strong> ${rsi.toFixed(1)}<br>
+        <strong>Signal:</strong> <span class="${signal === 'BUY' ? 'buy' : 'sell'}">${signal}</span><br>
+        <strong>AI Confidence:</strong> ${confidence}%
+      `;
+
+      if (signal !== "NEUTRAL") {
+        tradeBtn.style.display = "block";
+        tradeBtn.innerText = `Execute ${signal} Trade`;
+      }
+    }
+
+    function placeTrade() {
+      const stake = parseFloat(document.getElementById('stake').value);
+      const symbol = document.getElementById('symbol').value;
+      const contractType = latestSignal === "BUY" ? "CALL" : "PUT";
+
+      document.getElementById('resultBox').innerHTML += "<br>Placing trade on your demo account...";
+
+      ws.send(JSON.stringify({
+        buy: 1,
+        price: stake,
+        parameters: {
+          amount: stake,
+          basis: "stake",
+          contract_type: contractType,
+          currency: "USD",
+          duration: 5,
+          duration_unit: "m",
+          symbol: symbol
+        }
+      }));
+    }
+  </script>
+</body>
+</html>
